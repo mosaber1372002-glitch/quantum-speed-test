@@ -1,0 +1,19 @@
+{
+  "name": "quantum-speed-test",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cyberpunk internet speed test: download, upload, ping and jitter measured live in the browser.",
+  "scripts": {
+    "start": "node scripts/dev-server.mjs",
+    "check": "node scripts/dev-server.mjs --check",
+    "start:static": "serve .",
+    "dev": "vercel dev"
+  },
+  "devDependencies": {
+    "serve": "^14.2.4"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  }
+}
