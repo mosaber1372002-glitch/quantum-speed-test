@@ -77,6 +77,8 @@ h2::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--c)
 #srvSel{background:#0a0d1c;color:var(--ink);border:1px solid #ffffff30;padding:9px 12px;font:14px var(--m);max-width:100%;min-width:0}#srvSel:focus-visible{outline:1px solid var(--cyan)}#srvSel:disabled{opacity:.5}
 .btn{background:none;border:1px solid #ffffff30;color:var(--ink);padding:9px 18px;font:500 14px var(--f);letter-spacing:.1em;cursor:pointer;transition:.25s}
 .btn:hover{border-color:var(--cyan);color:var(--cyan);box-shadow:0 0 16px #19f1ff40}
+a.btn{display:inline-block;text-decoration:none}
+#rtrAddr{background:#0a0d1c;color:var(--ink);border:1px solid #ffffff30;padding:9px 12px;font:14px var(--m);width:11.5em;max-width:100%;min-width:0}#rtrAddr:focus-visible{outline:1px solid var(--cyan)}
 .bar{display:flex;gap:10px;margin:14px 0;flex-wrap:wrap}
 .cols{display:grid;grid-template-columns:1fr 1fr;gap:20px}
 #bars{display:flex;align-items:flex-end;gap:8px;height:170px;padding:14px 0}
@@ -139,6 +141,7 @@ th:first-child,td:first-child{text-align:left}
       <dl class="info" id="info"></dl>
       <div class="bar"><label class="leg" for="srvSel" style="align-self:center">TEST SERVER</label><select id="srvSel" aria-label="Test server"><option value="auto">Automatic (lowest latency)</option></select><span class="leg" id="srvNote" style="align-self:center"></span></div>
       <div class="bar"><button class="btn" id="geoBtn" hidden>ENABLE LOCATION</button><span class="leg" id="geoMsg" style="align-self:center"></span></div>
+      <div class="bar" id="rtrBar"><label class="leg" for="rtrAddr" style="align-self:center">ROUTER</label><input id="rtrAddr" list="rtrList" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Router address" placeholder="192.168.1.1"><datalist id="rtrList"><option value="192.168.1.1"><option value="192.168.0.1"><option value="192.168.100.1"><option value="192.168.1.254"><option value="192.168.8.1"><option value="192.168.2.1"><option value="10.0.0.1"></datalist><a class="btn" id="rtrBtn" href="#" target="_blank" rel="noopener noreferrer">OPEN ROUTER SETTINGS</a><span class="leg" id="rtrMsg" style="align-self:center"></span></div>
       <div class="bar"><button class="btn" id="refresh">REFRESH</button><span class="leg" id="infoNote" style="align-self:center"></span></div>
     </div>
   </section>
@@ -277,7 +280,11 @@ async function rtt(sv){if(await probe(sv,null,3000)==null)return{rtt:null,ok:0,n
 async function verify(sv){const c=new AbortController(),t=setTimeout(()=>c.abort(),8000),t0=performance.now();try{const r=await fetch(sv.down(1e6),fopt(sv,c.signal));if(!r.ok)return 0;const n=(await r.arrayBuffer()).byteLength;return n>=9e5?n*8/1e6/Math.max(.001,(performance.now()-t0)/1000):0}catch{return 0}finally{clearTimeout(t)}}
 const UPBLOB=new Uint8Array(3e5);
 async function verifyUp(sv){const c=new AbortController(),t=setTimeout(()=>c.abort(),8000);try{const r=await fetch(sv.up(),{method:'POST',body:UPBLOB,...fopt(sv,c.signal)});await r.arrayBuffer();return r.ok}catch{return false}finally{clearTimeout(t)}}
-async function verifyC(c){const m=await verify(c.sv);c.mbps=m;if(!m){c.verified=false;c.state='down';c.why='download test failed';return false}
+/* a verification costs about 1.3 MB; its result is remembered for 10 minutes (and forgotten when the public IP changes) so re-discovery does not repeat it */
+const VC=new Map();let VCIP=null;
+async function verifyC(c){const hit=VC.get(c.sv.id);if(hit&&Date.now()-hit.t<6e5){c.mbps=hit.mbps;c.upOk=hit.upOk;c.verified=hit.ok;if(!hit.ok){c.state='down';c.why=hit.why}return hit.ok}
+ const ok=await verifyC0(c);VC.set(c.sv.id,{t:Date.now(),ok,mbps:c.mbps,upOk:c.upOk,why:c.why});return ok}
+async function verifyC0(c){const m=await verify(c.sv);c.mbps=m;if(!m){c.verified=false;c.state='down';c.why='download test failed';return false}
  const up=await verifyUp(c.sv);c.upOk=up;if(!up){c.verified=false;c.state='down';c.why='upload test failed';return false}c.verified=true;return true}
 
 /* where the visitor is, as precisely as is known, kept in memory only: device position if granted, else the IP databases' estimate */
@@ -306,14 +313,14 @@ async function discover(){
   else{const r=await fj('/api/servers',{cache:'no-store'});if(r.ok){list=r.json.servers||[];SV.dir=r.json.directory||{state:'ok'};if(r.json.vercelRegion)info.vercelRegion=r.json.vercelRegion}else SV.dir={state:API.state==='missing'?'api-missing':'failed',error:r.why}}
   if(run!==SV.run)return;
   shortlist(list).forEach(({s,tier})=>SV.cands.push({sv:lsServer(s),tier,state:'new'}));
-  SV.stats={found:list.length,probed:SV.cands.length,reachable:0,verified:0};renderServers();
+  SV.stats={found:list.length,probed:SV.cands.length,local:SV.cands.filter(c=>c.tier==='city'||c.tier==='country').length,reachable:0,verified:0};renderServers();
   await pool(SV.cands,6,async c=>{c.state='probing';const r=await rtt(c.sv);c.rtt=r.rtt;c.okP=r.ok;c.nP=r.n;
    if(r.rtt==null){c.state='down';c.why='no answer to latency probes'}else if(r.ok<3){c.state='down';c.why='unreliable: only '+r.ok+'/'+r.n+' probes answered'}else c.state='ok';
    if(run===SV.run)renderServers()});
   if(run!==SV.run)return;
   const alive=SV.cands.filter(c=>c.state==='ok').sort((a,b)=>a.rtt-b.rtt);SV.stats.reachable=alive.length;
   /* the nearest by latency, plus Cloudflare / this site (so they compete on the same evidence), must pass the download and upload check */
-  for(const c of [...new Set([...alive.slice(0,4),...alive.filter(c=>c.tier==='provisioned')])]){if(run!==SV.run)return;await verifyC(c)}
+  for(const c of [...new Set([...alive.slice(0,3),...alive.filter(c=>c.tier==='provisioned')])]){if(run!==SV.run)return;await verifyC(c)}
  }finally{if(run===SV.run){SV.stats.verified=SV.cands.filter(c=>c.verified).length;SV.busy=false;renderServers();diagServer()}}})();
  await SV.ready}
 function wanted(){if(SV.sel!=='auto'){const m=SV.cands.find(c=>c.sv.id===SV.sel&&c.state!=='down');if(m)return m}
@@ -330,7 +337,8 @@ function renderServers(){const sel=$('#srvSel');if(!sel)return;const rk=c=>c.sta
  const ok=[...sel.options].some(o=>o.value===SV.sel&&!o.disabled);SV.sel=ok?SV.sel:'auto';sel.value=SV.sel;sel.disabled=S.running;
  const w=wanted(),s=SV.stats,d=SV.dir,busy=SV.busy||SV.cands.some(c=>c.state==='probing'||c.state==='new');
  const dirNote=d&&d.state&&d.state!=='ok'?(d.state==='api-missing'?'Server directory needs the /api routes (static server?). ':'Server directory unavailable ('+(d.error||d.state)+'). '):'';
- $('#srvNote').textContent=busy?'Measuring latency and checking candidate servers…':dirNote+(w?(SV.sel==='auto'?'Auto-selected: ':'Selected: ')+svLabel(w.sv)+' · '+Math.round(w.rtt)+' ms · '+s.found+' found, '+s.reachable+' reachable, '+s.verified+' verified':'No test server reachable yet.');
+ const ctry=geo?.country||info.ipGeo?.country,noLocal=!busy&&d?.state==='ok'&&s.found>0&&s.local===0&&ctry?'No community server is listed in '+ctry+', so nearby countries were measured. ':'';
+ $('#srvNote').textContent=busy?'Measuring latency and checking candidate servers…':dirNote+noLocal+(w?(SV.sel==='auto'?'Auto-selected: ':'Selected: ')+svLabel(w.sv)+' · '+Math.round(w.rtt)+' ms · '+s.found+' found, '+s.reachable+' reachable, '+s.verified+' verified':'No test server reachable yet.');
  renderInfo()}
 function diagServer(){const w=wanted(),p=here();
  DIAG.server={directory:SV.dir,counts:{...SV.stats},measuredFrom:p?p.kind:null,
@@ -414,7 +422,10 @@ function device(){const ua=navigator.userAgent,ch=navigator.userAgentData;let ty
  let os=/Windows NT 10/.test(ua)?(winOS.v||'Windows'):/Android/.test(ua)?'Android':/iPhone|iPad/.test(ua)?'iOS / iPadOS':/Mac OS X|Macintosh/.test(ua)?'macOS':/CrOS/.test(ua)?'ChromeOS':/Linux/.test(ua)?'Linux':ch?.platform||null;
  const m=re=>(ua.match(re)||[])[1];let br=null;
  if(m(/Edg\/([\d.]+)/))br='Edge '+m(/Edg\/(\d+)/);else if(m(/OPR\/(\d+)/))br='Opera '+m(/OPR\/(\d+)/);else if(m(/Firefox\/(\d+)/))br='Firefox '+m(/Firefox\/(\d+)/);else if(m(/(?:Chrome|CriOS)\/(\d+)/))br='Chrome '+m(/(?:Chrome|CriOS)\/(\d+)/);else if(m(/Version\/(\d+).*Safari/))br='Safari '+m(/Version\/(\d+)/);
- const c=navigator.connection;return{type,os,br,conn:c?[c.effectiveType&&c.effectiveType.toUpperCase(),c.type,c.downlink&&('~'+c.downlink+' Mbps est.')].filter(Boolean).join(' · '):null}}
+ /* navigator.connection describes the link from this device to its router or tower (Wi-Fi, cellular, ...), NOT the internet subscription (fiber, DSL, ...).
+    Its 'effectiveType' (4g...) is only a speed class the browser estimates. Safari and Firefox do not provide any of it. */
+ const c=navigator.connection,ty={wifi:'Wi-Fi',cellular:'Cellular',ethernet:'Ethernet',bluetooth:'Bluetooth',wimax:'WiMAX',other:'Other',none:'Offline'}[c?.type]||null;
+ return{type,os,br,conn:ty,connNote:c?[c.effectiveType&&'browser speed class '+c.effectiveType.toUpperCase(),c.downlink&&('about '+c.downlink+' Mbps by the browser’s own estimate')].filter(Boolean).join(', ')||null:null}}
 /* the UA string says "Windows NT 10" for both Windows 10 and 11; Client Hints can tell them apart where supported */
 navigator.userAgentData?.getHighEntropyValues?.(['platformVersion']).then(v=>{if(navigator.userAgentData.platform==='Windows'&&v.platformVersion){winOS.v=parseInt(v.platformVersion)>=13?'Windows 11':'Windows 10';renderInfo()}}).catch(()=>{});
 
@@ -434,6 +445,7 @@ async function loadInfo(){const seq=++loadSeq,prev=info.ip;lastLoad=Date.now();$
  if(seq!==loadSeq)return;
  const B=cf.ok?cf.json:null,M=m.ok?m.json:null,seen=[B?.clientIp,a4.json?.ip,a6.json?.ip,M?.ip].filter(Boolean);
  const v4s=[...new Set(seen.filter(isV4))],v6s=[...new Set(seen.filter(isV6))],active=B?.clientIp||M?.ip||v4s[0]||v6s[0]||null;
+ if(VCIP!==active){VC.clear();VCIP=active}
  /* the provider lookup must describe the address that is actually in use */
  let A=M&&M.ip===active?M:null,lookupWhy=m.ok?null:m.why;
  if(!A&&active&&WEB&&API.state!=='missing'){const r=await fj('/api/meta?ip='+encodeURIComponent(active),nc);if(seq!==loadSeq)return;if(r.ok){A=r.json;lookupWhy=null}else lookupWhy=r.why}
@@ -441,17 +453,20 @@ async function loadInfo(){const seq=++loadSeq,prev=info.ip;lastLoad=Date.now();$
 
  /* location candidates, best first */
  const cfGeo=B&&(B.city||B.country)?{city:B.city||null,region:B.region||null,cc:String(B.country||'').length===2?String(B.country).toUpperCase():null,country:countryName(B.country),lat:numOrNull(B.latitude),lon:numOrNull(B.longitude),src:'Cloudflare'}:null;
- const srvGeo=A?.geo&&(A.geo.city||A.geo.country||A.geo.cc)?{...A.geo,src:'IP databases'}:null;
+ let srvGeo=A?.geo&&(A.geo.city||A.geo.country||A.geo.cc)?{...A.geo,src:'IP databases'}:null;
+ /* the databases split on the city: a third independent estimate (Cloudflare) may settle it, only if it names one of the cities already proposed */
+ const split=A?.geo?.cityConflict||null;let tie=null;
+ if(split&&cfGeo?.city){const m=(A.geo.cityVotes||[]).find(v=>v.city&&norm(v.city)===norm(cfGeo.city));if(m){srvGeo={...srvGeo,city:m.city,region:m.region||null,lat:m.lat??null,lon:m.lon??null};tie=m.city}}
  let direct=null,directWhy=null;
- if(!srvGeo?.city&&!cfGeo?.city&&active){const r=await fj('https://ipwho.is/'+encodeURIComponent(active),nc,4000);if(seq!==loadSeq)return;
+ if(!split&&!srvGeo?.city&&!cfGeo?.city&&active){const r=await fj('https://ipwho.is/'+encodeURIComponent(active),nc,4000);if(seq!==loadSeq)return;
   if(r.ok&&r.json.success!==false)direct={city:r.json.city||null,region:r.json.region||null,country:r.json.country||null,cc:r.json.country_code||null,lat:numOrNull(r.json.latitude),lon:numOrNull(r.json.longitude),src:'ipwho.is (direct)'};else directWhy=r.ok?String(r.json.message||'lookup refused'):r.why}
- const cands=[srvGeo,cfGeo,direct].filter(Boolean),ipGeo=cands.find(g=>g.city)||cands.find(g=>g.country||g.cc)||null;
- const geoSrc=!ipGeo?null:ipGeo===srvGeo?(GEO_BASIS[A.geo.basis]?GEO_BASIS[A.geo.basis](A.geo.agree?.length||1):'IP databases'):ipGeo.src;
+ const cands=(split&&!tie?[srvGeo]:[srvGeo,cfGeo,direct]).filter(Boolean),ipGeo=cands.find(g=>g.city)||cands.find(g=>g.country||g.cc)||null;
+ const geoSrc=!ipGeo?null:tie&&ipGeo===srvGeo?'IP databases split; Cloudflare agrees with '+tie:ipGeo===srvGeo?(GEO_BASIS[A.geo.basis]?GEO_BASIS[A.geo.basis](A.geo.agree?.length||1):'IP databases'):ipGeo.src;
  const cfEdge=B?.colo?[B.colo.city||B.colo.iata,countryName(B.colo.cca2)].filter(Boolean).join(', ')||null:null;
 
  info={ip:active,v4:v4s.includes(active)?active:v4s[0]||null,v6:v6s.includes(active)?active:v6s[0]||null,A,lookupWhy,
   asn,asnOrg:A?.asn!=null?A.asnOrg:(cfAsn?.org||null),ipGeo:ipGeo?{city:ipGeo.city||null,region:ipGeo.region||null,country:ipGeo.country||countryName(ipGeo.cc),cc:ipGeo.cc||null,lat:ipGeo.lat??null,lon:ipGeo.lon??null}:null,geoSrc,
-  vercelRegion:M?.vercelRegion||null,cfEdge};
+  vercelRegion:M?.vercelRegion||null,cfEdge,geoConflict:split&&!tie?split:null};
 
  const notes=[],why=A?.ispReason,net=A?.network?' ('+A.network+')':'',failed=(A?.diag?.providers||[]).filter(p=>p.status==='failed');
  if(API.state==='missing'){notes.push('This server has no /api routes (a static file server?), so ISP, ASN, location lookups and the server directory are unavailable. Start it with npm start, or deploy to Vercel.');
@@ -474,8 +489,8 @@ async function loadInfo(){const seq=++loadSeq,prev=info.ip;lastLoad=Date.now();$
  DIAG.env={page:location.protocol+'//'+location.host,apiRoutes:API.state,at:new Date().toISOString()};
  DIAG.isp={addresses:{used:active,cloudflare:B?.clientIp||null,thisServer:M?.ip||null,ipv4Check:a4.json?.ip||null,ipv6Check:a6.json?.ip||null,mismatch:v4s.length>1||v6s.length>1},
   lookup:A?{ok:true,forAddress:A.ip,cached:!!A.cached}:{ok:false,why:API.state==='missing'?'no /api routes on this server':lookupWhy},
-  cloudflareAsn:cfAsn,providers:A?.diag?.providers||[],decision:A?.diag?.isp||null,asn:A?.diag?.asn||null,operator:A?.operator||null,
-  result:{isp:A?.isp||null,confidence:A?.ispConfidence||null,reason:A?.ispReason||null,detail:A?.ispDetail||null}};
+  cloudflareAsn:cfAsn,providers:A?.diag?.providers||[],decision:A?.diag?.isp||null,asn:A?.diag?.asn||null,asnName:A?.diag?.asnName||null,operator:A?.operator||null,
+  result:{isp:A?.isp||null,confidence:A?.ispConfidence||null,reason:A?.ispReason||null,detail:A?.ispDetail||null,note:A?.ispNote||null}};
  DIAG.location={...DIAG.location,ip:{chosen:ipGeo?{city:ipGeo.city||null,region:ipGeo.region||null,country:ipGeo.country||ipGeo.cc||null,from:geoSrc}:null,
   sources:{ipDatabases:srvGeo?{city:srvGeo.city||null,country:srvGeo.country||srvGeo.cc||null,basis:A.geo.basis,agree:A.geo.agree||[]}:{unavailable:API.state==='missing'?'no /api routes':lookupWhy||'no data'},
    cloudflare:cfGeo?{city:cfGeo.city,country:cfGeo.country}:{unavailable:B?'Cloudflare returned no location':cf.why},
@@ -488,11 +503,13 @@ function locationRow(){
  if(geo?.place){const a=geo.acc,s=a<1000?Math.round(a)+' m':(a/1000).toFixed(a<10000?1:0)+' km';return[geo.place,'Device location, accurate to ~'+s]}
  const g=info.ipGeo;
  if(g&&(g.city||g.country)){const vpn=info.A?.ispReason==='vpn',src=info.geoSrc?' ('+info.geoSrc+')':'';
+  if(!g.city&&info.geoConflict)return[place(null,null,g.country),'Country only: the IP databases disagree on the city ('+info.geoConflict.map(c=>c.city+' per '+c.sources.join(', ')).join('; ')+').'];
   return[place(g.city,g.region,g.country),vpn?'Estimated from IP. Follows your VPN.':g.city?'Estimated from IP'+src+'. May be inaccurate.':'Country only'+src+': no source could place the city.']}
  return[null,API.state==='missing'?'Needs the /api routes: run npm start or deploy to Vercel':info.lookupWhy?'No IP database answered ('+info.lookupWhy+')':'No source returned a location for this address']}
-const ISP_WHY={vpn:'VPN or proxy detected',hosting:'Hosting or data-center network','not-isp':'Network is classified as business or institutional',conflict:'Sources disagree on the provider','insufficient-evidence':'No source names a retail ISP','low-confidence':'No source names a retail ISP','cgnat-address':'Carrier-grade NAT address','lookup-failed':'All IP databases failed','rate-limited':'Lookup limit reached','private-ip':'Private address','invalid-ip':'Invalid address','no-ip':'No client address'};
+const ISP_WHY={vpn:'VPN or proxy detected',hosting:'Hosting or data-center network','not-isp':'Network is classified as business or institutional',conflict:'Sources disagree on the provider','insufficient-evidence':'No source names a retail ISP','shared-network':'Shared national network: the IP databases only name its owner, not the retail brand you pay','low-confidence':'No source names a retail ISP','cgnat-address':'Carrier-grade NAT address','lookup-failed':'All IP databases failed','rate-limited':'Lookup limit reached','private-ip':'Private address','invalid-ip':'Invalid address','no-ip':'No client address'};
 /* [value, small text, tooltip]. The retail ISP is only shown when the evidence supports it; the ASN owner is shown as the network operator instead */
 function providerRow(){const A=info.A;
+ if(A?.isp&&A.ispNote)return[A.isp,A.ispNote,A.ispBasis||''];
  if(A?.isp)return[A.isp,A.ispConfidence==='high'?'Cross-checked by '+A.ispSources.length+' sources: '+A.ispSources.join(', '):'Likely. Supported by '+A.ispSources.join(', ')+', not cross-checked',A.ispBasis||''];
  if(!A)return[null,API.state==='missing'?'Needs the /api routes: run npm start or deploy to Vercel':info.lookupWhy?'Lookup unavailable: '+info.lookupWhy:'',''];
  const op=A.operator&&A.operator.name&&!['vpn','hosting'].includes(A.ispReason)?' Network operator: '+A.operator.name+'.':'';
@@ -504,11 +521,11 @@ function serverRow(){const cur=SV.cur&&(SV.cands.find(x=>x.sv.id===SV.cur.sv.id)
  return[c.sv.name,parts]}
 function renderInfo(){const d=device(),[pv,pt,pw]=providerRow(),[lv,lt]=locationRow(),[sv,st]=serverRow(),A=info.A;
  DIAG.location.final=lv?{place:lv,source:geo?.place?'device (browser geolocation)':'IP address ('+(info.geoSrc||'unknown')+')'}:{place:null,reason:lt||null};
- const asnTxt=info.asn!=null?'AS'+info.asn+(info.asnOrg?' · '+info.asnOrg:''):null;
- const asnTag=A?.asnConflict?'Sources disagree on the ASN owner':info.asnOrg?(A?.isp&&A.asnSameAsIsp?'Network operator (ASN owner), same organization as the provider':'Network operator (ASN owner)'):'';
+ const opTxt=info.asnOrg||null,opTag=A?.asnConflict?'Sources disagree on the AS number':!opTxt?'':A?.asnRegistryName?'Owns this address. Registered as '+A.asnRegistryName:A?.isp&&A.asnSameAsIsp?'Owns this address. Same organization as the provider':'Owns this address';
+ const asnTxt=info.asn!=null?'AS'+info.asn:null;
  const ipRows=info.v4&&info.v6?[['IPv4',info.v4,'',info.ip===info.v4?'Used by the speed test':''],['IPv6',info.v6,'',info.ip===info.v6?'Used by the speed test':'']]:[['Public IP',info.ip,'Not detectable','']];
- const rows=[['Internet provider',pv,'Not confirmed',pt,pw],['Network identifier',asnTxt,'Not detectable',asnTag],'--',
-  ['Location',lv,'Not detectable',lt],...ipRows,['Test server',sv,'Not selected yet',st],['Device',d.type],['Operating system',d.os],['Browser',d.br],['Connection',[d.conn,A?.connectionType?A.connectionType+' (per IP database)':A?.mobile?'Mobile network (per IP database)':null].filter(Boolean).join(' · ')||null,'Not reported by this browser'],
+ const rows=[['Internet provider',pv,'Not confirmed',pt,pw],['Network operator',opTxt,'Not detectable',opTag],['ASN',asnTxt,'Not detectable',A?.asnConflict?'Candidates: '+A.asnConflict.map(n=>'AS'+n).join(', '):''],'--',
+  ['Location',lv,'Not detectable',lt],...ipRows,['Test server',sv,'Not selected yet',st],['Device',d.type],['Operating system',d.os],['Browser',d.br],['Connection',[d.conn,A?.connectionType?A.connectionType+' (per IP database)':A?.mobile?'Mobile network (per IP database)':null].filter(Boolean).join(' · ')||(d.connNote?'Link type not reported':null),'Not reported by this browser',d.conn||d.connNote?'Browser-reported link to your router or tower, not your internet plan'+(d.connNote?'. '+d.connNote:''):''],
   ['Local time',new Date().toLocaleString([], {dateStyle:'medium',timeStyle:'medium'})+' ('+Intl.DateTimeFormat().resolvedOptions().timeZone+')']];
  const row=([k,v,na,tag,tip])=>`<div class="row"><dt>${k}</dt><dd class="${v?'':'na'}"${tip?` title="${esc(tip)}"`:''}>${v?esc(v):na||'Not detectable'}${tag?`<small>${esc(tag)}</small>`:''}</dd></div>`;
  $('#info').innerHTML='<div class="grp" role="presentation">NETWORK INFORMATION</div>'+rows.map(r=>r==='--'?'':row(r)).join('')}
@@ -557,6 +574,16 @@ document.addEventListener('visibilitychange',()=>{if(!document.hidden&&Date.now(
 setInterval(()=>{if(!document.hidden&&!S.running&&Date.now()-lastLoad>180000)loadInfo()},30000);
 $('#refresh').onclick=()=>{loadInfo().then(()=>discover())};
 $('#srvSel').onchange=e=>{SV.sel=e.target.value;renderServers()};
+/* Router settings. A browser cannot tell a website which address the router has, so the visitor picks or types it (common ones are suggested).
+   This is only a link that opens the router's own page in a new tab: nothing is fetched from it, no network is scanned, and no login passes through
+   this site. Only private IPv4 addresses are accepted, so the link can never lead to an outside website. */
+(()=>{const a=$('#rtrAddr'),b=$('#rtrBtn'),m=$('#rtrMsg');if(!a||!b||!m)return;
+ const priv=v=>{const p=String(v).trim().split('.');if(p.length!==4||p.some(x=>!/^\d{1,3}$/.test(x)||+x>255))return false;const[x,y]=p.map(Number);return x===10||(x===172&&y>=16&&y<=31)||(x===192&&y===168)};
+ let saved=null;try{saved=localStorage.getItem('quantum.router')}catch{}
+ a.value=saved&&priv(saved)?saved:'192.168.1.1';
+ const sync=()=>{const ok=priv(a.value);b.href=ok?'http://'+a.value.trim()+'/':'#';b.setAttribute('aria-disabled',ok?'false':'true');b.style.opacity=ok?'':'.5';
+  m.textContent=ok?'Opens your router’s own login page, and only works while you are on its network. Not sure of the address? On Windows run ipconfig and read “Default Gateway”; it is also on the router’s label. This site never sees the login.':'Enter your router’s address, like 192.168.1.1 (home-network addresses only).'};
+ a.oninput=sync;b.onclick=e=>{if(!priv(a.value)){e.preventDefault();return}try{localStorage.setItem('quantum.router',a.value.trim())}catch{}};sync()})();
 
 /* ui wiring */
 $('#go').onclick=()=>start();

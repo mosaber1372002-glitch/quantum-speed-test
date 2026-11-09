@@ -17,8 +17,9 @@ could only show Cloudflare. That is a local setup problem, not an IP-database fa
 public address of its own. Copy `.env.example` to `.env.local` to add optional provider keys.
 
 ### Diagnostics
-Open the page with `?debug` (or run `localStorage.setItem('quantum.debug','1')`) and the browser console logs, for each of the three
-areas, what every step returned; `quantumDiag()` in the console returns the same object at any time. It never contains keys or tokens.
+Open the page with `?debug` at the end of the address (or run `localStorage.setItem('quantum.debug','1')`). A DIAGNOSTICS box appears at the bottom of the page with a
+COPY DIAGNOSTICS button (works on phones, no console needed; the IP address is masked in the copy), the console logs each step, and `quantumDiag()` returns the same object at any time.
+It never contains keys or tokens.
 - **location**: browser permission and position state, reverse-geocoder tried/failed, each IP database's vote, the final place and its source
 - **isp**: per-provider status/latency/detail, the claims and clusters considered, ASN and its organisation, confidence, reason when unconfirmed
 - **server**: directory state, found / reachable / verified counts, every candidate's latency, throughput and upload result, the selected server
@@ -36,7 +37,7 @@ Vercel project, **Settings, Domains**, add your domain, then set the DNS records
 ## Test servers and selection
 The page measures against the best of several candidates, chosen the way Ookla documents its own approach (geolocate, shortlist nearby servers, ping them, pick the lowest latency), using only endpoints it may legitimately use:
 
-- **Public LibreSpeed servers** (`api/servers.js`): volunteer-run servers from the open LibreSpeed directory. Each entry's name, city, country and sponsor are read from the directory; the directory publishes no coordinates, so nearness is decided by city and country match, then by distance between country centres (never shown as a server location).
+- **Public LibreSpeed servers** (`api/servers.js`): volunteer-run servers from the open LibreSpeed directory. Their backends answer a page on another website only when the request carries `cors=true` (documented by LibreSpeed); the page sends it, otherwise every server looks unreachable. Each entry's name, city, country and sponsor are read from the directory; the directory publishes no coordinates, so nearness is decided by city and country match, then by distance between country centres (never shown as a server location).
 - **Cloudflare** (`speed.cloudflare.com`). It is *anycast*: the network decides which edge answers. It is shown as "Cloudflare Speed Test Endpoint" with a separate "Edge location" (for example Marseille), never as a dedicated server in that city or as your location.
 - **This site's own edge function** (`api/down.js`, `api/up.js`): a fallback if the others are blocked.
 
@@ -56,8 +57,33 @@ Free sources (ipapi.is, ipwho.is) often cannot name the retail ISP. For that, ad
 
 Responses are `no-store`; the only cache is a 10-minute per-isolate map keyed by IP address, so a new connection can never receive the previous connection's data. The page re-identifies on network-change events, when the device comes back online, when the tab returns after a minute, and every few minutes while idle.
 
+
+### Company names instead of registry handles
+Registries name a network by a handle ("TE-AS", "COMCAST-7922"). `api/_asn-names.js` finds the name a person would recognise, for any AS number worldwide, in this order:
+1. `api/_known-asns.js`: a list you curate (brand names such as "WE (Telecom Egypt)"). Add one line per AS number to override or extend it.
+2. **PeeringDB** (free, no key): the operator's own business name and network type. "Cable/DSL/ISP" counts as a retail provider.
+3. **RIPEstat** (free, no key, all five registries): the registered holder, used for a display name only.
+The name is looked up only for an AS number the IP databases reported, cached for a day, and shown as the Network identifier ("AS55836 · Reliance Jio Infocomm", with the registry handle in small text). It is used as the Internet provider only when no database named a usable ISP and the list or PeeringDB marks the network as a retail provider, and the row says so. It is never used for VPN, hosting or business networks. If every source fails, the databases' own name is kept and the diagnostics say why.
+### Rules the provider detection follows
+- The ISP and the network operator (the owner of the AS number) are separate rows and are never treated as the same thing.
+- A maker of routers or network equipment (TP-Link, Huawei, ZTE, ...) is never accepted as an ISP; it is listed under `rejected` in the diagnostics.
+- A network flagged `shared: true` in `api/_known-asns.js` (a national or wholesale network, AS8452 for example) is shown as the operator, but its owner is never assumed to be the visitor's retail brand; the provider row stays "Not confirmed" unless a database names a different retail provider.
+- VPN, hosting and business networks never get a provider name.
+
+### Location: when databases disagree
+Each database's city is a vote. A clear majority wins. A tie is settled only by an independent hint (Cloudflare's or Vercel's own estimate naming one of the proposed cities). Otherwise no city is shown: the row says "Country only" and lists who said what. Device location, when granted, always comes first.
+
+### Data use
+Discovery pings up to about 16 servers (a few KB each) and verifies at most 3 plus the two built-in endpoints (about 1.3 MB each). Verification results are remembered for 10 minutes and dropped when the public IP changes, so refreshing or updating the location does not repeat them. A speed test itself is capped at about 8 seconds per direction.
+
+### Router settings
+The ROUTER row is a link that opens the router's own login page (for example `http://192.168.1.1/`) in a new tab. Browsers do not reveal the router's address to websites, so the visitor picks or types it (common ones are suggested, and the choice is remembered in the browser). The page never contacts that address, scans the network, or sees the login; only private IPv4 addresses are accepted. It works only while the visitor is on that router's network.
+
+### Security
+`/api/up` rejects bodies over 64 MB, `/api/down` caps a response at 25 MB, `/api/meta?ip=` lookups are rate-limited, and `vercel.json` sets `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` (geolocation for this site only) and `X-Frame-Options`.
+
 ## Location
-1. **Device location** (precise): only requested after a click (or silently if the browser already granted it), rounded to ~1 km, turned into a place name by `api/geo.js` (Nominatim, then Photon if Nominatim fails), kept in memory, never stored.
+1. **Device location** (precise): requested once when the page opens (the visitor can refuse) and again with the button, rounded to ~1 km, turned into a place name by `api/geo.js` (Nominatim, then Photon if Nominatim fails), kept in memory, never stored.
 2. **IP location** (approximate), used whenever device location is missing, denied, too imprecise or its place name cannot be resolved. It does not depend on any browser permission: the IP databases in `api/meta.js` are cross-checked, then Cloudflare's own estimate, then a direct ipwho.is lookup from the browser.
 The row says which one it is ("Device location, accurate to ~35 m" or "Estimated from IP (2 IP databases agree)"). A city is never guessed: if no source has one, only the country is shown, and if none has anything the row says why.
 

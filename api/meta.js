@@ -1,4 +1,5 @@
 export const config = { runtime: 'edge' };
+import { friendlyAsn, isHandle } from './_asn-names.js';
 
 /*
  * /api/meta: IP intelligence, resolved server-side.
@@ -213,9 +214,14 @@ function sameNetwork(a, b, place) {
 const linked = (x, y, place) => !!(x && y) && ((x.name && y.name && sameNetwork(x.name, y.name, place)) || (x.domain && y.domain && regDomain(x.domain) && regDomain(x.domain) === regDomain(y.domain)));
 const pretty = n => (n && n === n.toUpperCase() && /\s/.test(n) && /[A-Z]{3}/.test(n) ? n.toLowerCase().replace(/(^|\s)(\S)/g, (_, s, c) => s + c.toUpperCase()) : n);
 
+/* makers of routers and network equipment are never ISPs (a database can return one through a router's dynamic-DNS name, for example) */
+const VENDOR = /\b(tp-?link|huawei|zte|d-?link|netgear|mikrotik|ubiquiti|cisco|juniper|asus(tek)?|linksys|tenda|fortinet|ruckus|arris|technicolor|sagemcom|zyxel|hikvision|dahua)\b/i;
 /* ---- decision: who is the retail ISP? Never derived from the ASN owner alone ---- */
 function decide(recs, place) {
-  const D = { claims: [], clusters: [] };
+  const D = { claims: [], clusters: [], rejected: [] };
+  const vendorRecs = recs.filter(r => r.isp && (VENDOR.test(r.isp) || VENDOR.test(r.domain || '')));
+  D.rejected = vendorRecs.map(r => ({ src: r.src, name: r.isp, why: 'network-equipment manufacturer, not an ISP' }));
+  const rej = D.rejected.length ? ` Ignored as equipment makers, not ISPs: ${D.rejected.map(x => `"${x.name}" (${x.src})`).join(', ')}.` : '';
   const names = recs.map(r => `${r.src}: ${r.isp ? 'ISP "' + r.isp + '"' : 'no ISP field'}${r.orgType ? ', network type ' + r.orgType : ''}${r.asnOrg ? ', ASN owner "' + r.asnOrg + '"' : ''}`).join('; ');
   if (!recs.length) return { ...D, reason: 'lookup-failed', detail: 'no provider returned data for this address' };
   const flag = recs.find(r => r.anonymizer);
@@ -223,7 +229,7 @@ function decide(recs, place) {
   const host = recs.find(r => r.hosting);
   if (host) return { ...D, reason: 'hosting', detail: `${host.src} classifies this address as a hosting or data-centre network` };
 
-  const claims = recs.filter(r => r.isp).map(r => ({ name: r.isp, domain: r.domain, src: r.src, w: r.authoritative ? 3 : r.typed ? 2 : 1 }));
+  const claims = recs.filter(r => r.isp && !vendorRecs.includes(r)).map(r => ({ name: r.isp, domain: r.domain, src: r.src, w: r.authoritative ? 3 : r.typed ? 2 : 1 }));
   D.claims = claims.map(c => ({ name: c.name, src: c.src, weight: c.w }));
   const ents = r => [{ name: r.isp, domain: r.domain }, { name: r.org, domain: r.domain }, { name: r.asnOrg, domain: r.domain }];
 
@@ -258,36 +264,46 @@ function decide(recs, place) {
 
   // 2. no source names an ISP. A network that a provider classifies as an ISP, whose ASN owner a second source
   //    corroborates, is accepted as supporting evidence (medium confidence); an ASN owner alone never is.
-  const asIsp = recs.find(r => r.asnType === 'isp' && r.asnOrg);
+  const asIsp = recs.find(r => r.asnType === 'isp' && r.asnOrg && !VENDOR.test(r.asnOrg));
   if (asIsp) {
     const prov = { name: asIsp.asnOrg, domain: asIsp.domain };
     const backers = recs.filter(r => r !== asIsp && ents(r).some(e => linked(prov, e, place)));
     if (backers.length) return { ...D, isp: asIsp.org && linked(prov, { name: asIsp.org }, place) ? asIsp.org : asIsp.asnOrg, confidence: 'medium', sources: [asIsp.src, ...backers.map(r => r.src)], basis: `${asIsp.src} classifies the ASN owner as an ISP and ${backers.map(r => r.src).join(', ')} name the same organisation. The retail ISP is inferred, not stated by any provider` };
   }
-  if (nonIsp) return { ...D, reason: 'not-isp', detail: `${nonIsp.src} classifies this network as ${nonIsp.orgType} ("${nonIsp.org}"), not a consumer ISP. ${names}` };
-  return { ...D, reason: 'insufficient-evidence', detail: `no provider names a retail ISP for this address. ${names}` };
+  if (nonIsp) return { ...D, reason: 'not-isp', detail: `${nonIsp.src} classifies this network as ${nonIsp.orgType} ("${nonIsp.org}"), not a consumer ISP. ${names}${rej}` };
+  return { ...D, reason: 'insufficient-evidence', detail: `no provider names a retail ISP for this address. ${names}${rej}` };
 }
 
 function consensusGeo(recs, hdr) {
   const gs = recs.filter(r => r.geo && (r.geo.city || r.geo.country || r.geo.cc)).map(r => ({ ...r.geo, src: r.src }));
   const norm = s => (s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').trim();
-  const votes = new Map();
-  gs.forEach(g => { const k = norm(g.city); if (k) votes.set(k, (votes.get(k) || 0) + 1); });
-  const best = [...votes.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
-  const pick = gs.find(g => norm(g.city) === best) || gs.find(g => g.cc || g.country) || {};
+  /* each city is a vote. A clear winner is used. A tie is broken only by an independent hint (the CDN's header); otherwise NO city is
+     chosen and the disagreement is reported, because picking one would present a guess as if the databases agreed. */
+  const byCity = new Map();
+  gs.forEach(g => { const k = norm(g.city); if (k) { const e = byCity.get(k) || { city: g.city, srcs: [] }; e.srcs.push(g.src); byCity.set(k, e); } });
+  const ranked = [...byCity.entries()].sort((a, b) => b[1].srcs.length - a[1].srcs.length);
+  let best = null, conflict = null;
+  if (ranked.length) {
+    const top = ranked.filter(e => e[1].srcs.length === ranked[0][1].srcs.length);
+    if (top.length === 1) best = top[0][0];
+    else { const h = hdr.city && top.find(e => e[0] === norm(hdr.city)); if (h) { best = h[0]; h[1].srcs.push('request-header'); } else conflict = ranked.map(e => ({ city: e[1].city, sources: e[1].srcs })); }
+  }
+  const pick = best ? (gs.find(g => norm(g.city) === best) || {}) : (gs.find(g => g.cc || g.country) || {});
+  const winSrcs = best ? byCity.get(best).srcs : [];
   const cc = (pick.cc || hdr.cc || '').toUpperCase() || null;
   let country = pick.country || gs.map(g => g.country).find(Boolean) || null;
   if (!country && cc) { try { country = new Intl.DisplayNames(['en'], { type: 'region' }).of(cc); } catch { /* keep null */ } }
-  const fromHeader = !pick.city && !!hdr.city;
+  if (conflict) { pick.city = null; pick.region = null; pick.lat = null; pick.lon = null; }
+  const fromHeader = !pick.city && !conflict && !!hdr.city;
   const cities = new Set(gs.map(g => norm(g.city)).filter(Boolean));
   return {
     city: pick.city || hdr.city || null, region: pick.region || null, country, cc,
     lat: pick.lat ?? null, lon: pick.lon ?? null, tz: pick.tz || null,
     source: 'ip-estimate',                                  // never presented as a verified physical location
     basis: pick.city ? 'ip-databases' : fromHeader ? 'request-header' : (country ? 'country-only' : null),
-    agree: pick.city ? gs.filter(g => norm(g.city) === best).map(g => g.src) : [],
+    agree: pick.city ? winSrcs : [], cityConflict: conflict,
     cityAgreement: cities.size > 1 ? false : (gs.filter(g => g.city).length > 1 ? true : null),
-    cityVotes: gs.map(g => ({ src: g.src, city: g.city, region: g.region, country: g.country }))
+    cityVotes: gs.map(g => ({ src: g.src, city: g.city, region: g.region, country: g.country, lat: g.lat ?? null, lon: g.lon ?? null }))
   };
 }
 
@@ -305,17 +321,38 @@ async function lookup(ip, family, hdr) {
   const asnOrgRaw = (asnRecs.find(r => r.typed) || asnRecs[0])?.asnOrg || recs.find(r => r.asnOrg)?.asnOrg || recs.map(r => r.org).find(Boolean) || null;
   const asnOrg = pretty(asnOrgRaw);
   const opName = d.reason === 'vpn' || d.reason === 'hosting' ? (recs.map(r => r.org).find(Boolean) || asnOrg) : null;
-  const ispName = pretty(d.isp || null);
+  let ispName = pretty(d.isp || null), ispConfidence = d.confidence || null, ispReason = d.reason || null, ispDetail = d.detail || null, ispBasis = d.basis || null, ispSources = d.sources || [], ispNote = null;
+  /* a name a person would recognise for the AS (see _asn-names.js). Only for an AS number the databases reported. */
+  const fr = asn != null ? await friendlyAsn(asn) : null, asnRegistry = asnOrg, reporters = asnRecs.map(r => r.src);
+  const blocked = ['vpn', 'hosting', 'not-isp', 'private-ip', 'cgnat-address'].includes(d.reason);
+  let ispFromList = false;
+  if (fr?.name && !blocked) {
+    if (fr.isIsp && ['insufficient-evidence', 'low-confidence', 'conflict', null].includes(d.reason ?? null) && (!ispName || isHandle(ispName))) {
+      ispName = fr.name; ispFromList = true; ispConfidence = 'medium'; ispReason = null; ispDetail = null;
+      ispSources = [fr.source, ...reporters];
+      ispBasis = `${fr.source} gives "${fr.name}" for AS${asn}${fr.source === 'PeeringDB' ? ` and lists it as an ISP${fr.type ? ' (' + fr.type + ')' : ''}` : ''}, and ${reporters.join(', ') || 'the IP databases'} report this AS number. No IP database gave a usable company name${asnRegistry ? `; they call the network "${asnRegistry}"` : ''}`;
+      ispNote = fr.source === 'known-provider list' ? `Known provider for AS${asn}. The IP databases gave no company name for it, so this is not cross-checked.` : `Name from ${fr.source}, which lists AS${asn} as an ISP. The IP databases gave no company name, so this is not cross-checked.`;
+    } else if (ispName && isHandle(ispName)) {
+      const was = ispName; ispName = fr.name; ispSources = ispSources.length ? ispSources : [fr.source];
+      ispNote = `The IP databases gave only the registry handle "${was}". Company name from ${fr.source}.`;
+    }
+  }
+  const asnShown = fr?.name || asnOrg;
+  /* a national/wholesale network (flagged in _known-asns.js): databases that merely restate its owner as "the ISP" do not prove the retail brand */
+  if (fr?.shared && ispName && !blocked && [asnRegistry, fr.name].some(n => n && sameNetwork(ispName, n, place))) {
+    ispDetail = `AS${asn} (${fr.name}) is a shared national network. ${ispSources.join(', ')} only name the network owner (\"${ispName}\"), which does not show which retail brand the visitor pays.`;
+    ispName = null; ispConfidence = null; ispReason = 'shared-network'; ispBasis = null; ispSources = []; ispNote = null;
+  }
 
   return {
     ip, family,
-    isp: ispName, ispConfidence: d.confidence || null, ispReason: d.reason || null, ispDetail: d.detail || null,
-    ispBasis: d.basis || null, ispSources: d.sources || [],
+    isp: ispName, ispConfidence, ispReason, ispDetail,
+    ispBasis, ispSources, ispNote,
     org: pretty(recs.map(r => r.org).find(Boolean) || null),
     connectionType: recs.map(r => r.connectionType).find(Boolean) || null,
-    asn, asnOrg, asnConflict: asns.length > 1 ? asns : null,
-    operator: asnOrg ? { name: asnOrg, kind: recs.some(r => r.asnType === 'isp' && r.asn === asn) ? 'isp' : 'unknown' } : null,
-    asnSameAsIsp: !!(ispName && asnOrg && sameNetwork(ispName, asnOrg, place)),
+    asn, asnOrg: asnShown, asnRegistryName: fr?.name && asnRegistry && !sameNetwork(asnRegistry, fr.name, place) ? asnRegistry : null, asnConflict: asns.length > 1 ? asns : null,
+    operator: asnShown ? { name: asnShown, kind: recs.some(r => r.asnType === 'isp' && r.asn === asn) ? 'isp' : 'unknown' } : null,
+    asnSameAsIsp: !!(ispName && asnShown && (ispFromList || sameNetwork(ispName, asnShown, place))),
     network: opName,
     mobile: recs.some(r => r.mobile) || null,
     geo,
@@ -323,8 +360,9 @@ async function lookup(ip, family, hdr) {
     diag: {
       providers: results.map(r => ({ name: r.name, status: r.status, ms: r.ms ?? null, detail: r.detail || null,
         said: r.rec ? { isp: r.rec.isp || null, org: r.rec.org || null, orgType: r.rec.orgType || null, asn: r.rec.asn ?? null, asnOrg: r.rec.asnOrg || null, city: r.rec.geo?.city || null, country: r.rec.geo?.country || r.rec.geo?.cc || null } : null })),
-      isp: { claims: d.claims, clusters: d.clusters, decision: d.isp ? 'accepted' : 'unconfirmed', confidence: d.confidence || null, basis: d.basis || null, reason: d.reason || null, detail: d.detail || null },
-      asn: { value: asn, org: asnOrgRaw, conflict: asns.length > 1 ? asns : null },
+      isp: { claims: d.claims, clusters: d.clusters, rejected: d.rejected, decision: ispName ? (ispFromList ? 'name from ' + fr.source : 'accepted') : 'unconfirmed', confidence: ispConfidence, basis: ispBasis, reason: ispReason, detail: ispDetail },
+      asnName: fr ? { shownAs: asnShown, source: fr.source || null, ...fr.diag } : null,
+      asn: { value: asn, org: asnOrgRaw, shownAs: asnShown, conflict: asns.length > 1 ? asns : null },
       geo: { chosen: [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || null, basis: geo.basis, agree: geo.agree, votes: geo.cityVotes }
     }
   };

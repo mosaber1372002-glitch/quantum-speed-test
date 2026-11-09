@@ -57,7 +57,8 @@ async function publicIp() {
 
 async function loadRoutes() {
   const routes = new Map();
-  for (const f of fs.readdirSync(API_DIR).filter(f => /\.(m?js)$/.test(f))) {
+  // like Vercel, files starting with an underscore are helpers (imported by endpoints), not endpoints themselves
+  for (const f of fs.readdirSync(API_DIR).filter(f => /\.(m?js)$/.test(f) && !f.startsWith('_'))) {
     const mod = await import(pathToFileURL(path.join(API_DIR, f)).href);
     if (typeof mod.default !== 'function') throw new Error(`api/${f} has no default export`);
     routes.set(f.replace(/\.m?js$/, ''), mod.default);
