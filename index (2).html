@@ -228,7 +228,14 @@ const numOrNull=v=>v!=null&&v!==''&&Number.isFinite(+v)?+v:null;
    In the browser console run quantumDiag(), or open the page with ?debug (or localStorage 'quantum.debug'='1') to log as it changes. */
 const DIAG={env:{},location:{},isp:{},server:{}};
 const DEBUG=/[?&]debug\b/.test(location.search)||(()=>{try{return localStorage.getItem('quantum.debug')==='1'}catch{return false}})();
-const dlog=k=>{if(DEBUG)console.log('[quantum:'+k+']',JSON.parse(JSON.stringify(DIAG[k])))};
+const maskIp=t=>t.replace(/\b(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}\b/g,'$1.x').replace(/\b(?:[0-9a-f]{1,4}:){3,}[0-9a-f:]*/gi,'[ipv6 hidden]');
+function paintDbg(){let d=document.getElementById('dbg');
+ if(!d){d=document.createElement('details');d.id='dbg';d.open=true;d.style.cssText='margin:16px;padding:12px;border:1px solid currentColor;font:11px/1.4 monospace;opacity:.9';
+  d.innerHTML='<summary style="cursor:pointer;font-size:13px">DIAGNOSTICS (debug mode)</summary><p>Tap the button, then paste the text into the chat. Your IP address is masked. No keys or passwords are included.</p><button id="dbgCopy" style="padding:8px 12px;margin:6px 0">COPY DIAGNOSTICS</button><pre id="dbgPre" style="white-space:pre-wrap;word-break:break-all;margin:0"></pre>';
+  document.body.appendChild(d);
+  d.querySelector('#dbgCopy').onclick=async e=>{const t=maskIp(JSON.stringify(DIAG,null,1));try{await navigator.clipboard.writeText(t);e.target.textContent='COPIED'}catch{const r=document.createRange();r.selectNodeContents(d.querySelector('#dbgPre'));const g=getSelection();g.removeAllRanges();g.addRange(r);e.target.textContent='SELECTED: NOW COPY'}}}
+ d.querySelector('#dbgPre').textContent=maskIp(JSON.stringify(DIAG,null,1))}
+const dlog=k=>{if(DEBUG){console.log('[quantum:'+k+']',JSON.parse(JSON.stringify(DIAG[k])));paintDbg()}};
 window.quantumDiag=()=>{const d=JSON.parse(JSON.stringify(DIAG));console.log(JSON.stringify(d,null,2));return d};
 
 /* Are the /api routes actually there? A static file server (e.g. `serve .`) answers every /api/* with a 404 page. That is a
@@ -241,13 +248,16 @@ async function fj(u,o,ms=6000){const c=new AbortController(),t=setTimeout(()=>c.
   return{ok:r.ok&&json!=null,status:r.status,json,why:r.ok?(json==null?'response was not JSON':null):(json&&(json.error||json.ispReason))||'HTTP '+r.status}}
  catch(e){return{ok:false,status:null,json:null,why:e.name==='AbortError'?'timeout after '+ms+' ms':'network error'+(e.message?' ('+e.message+')':'')}}finally{clearTimeout(t)}}
 
+/* LibreSpeed backends send CORS headers only when the request carries cors=true (see their docs). Without it the browser blocks every
+   answer and the server looks "unreachable". Their requests also stay free of cache headers, which would force a CORS preflight. */
+const fopt=(sv,sig)=>({...(sv.kind==='librespeed'?{}:{cache:'no-store'}),signal:sig});
 /* test servers. Every server exposes the same URL builders, so the engine is server-agnostic.
    Cloudflare is an anycast ENDPOINT: the city shown for it (e.g. Marseille) is only where your network happens to reach
    Cloudflare's edge. It is not your location and not a speed-test server of its own.
    Vercel is this site's own edge function. LibreSpeed servers are volunteer-run, discovered via /api/servers. */
 const cfServer=()=>({id:'cf',kind:'cloudflare',name:'Cloudflare Speed Test Endpoint',down:n=>`${BASE}/__down?bytes=${n}&r=${rid()}`,up:()=>`${BASE}/__up`,ping:()=>`${BASE}/__down?bytes=0&r=${rid()}`});
 const vcServer=()=>({id:'vercel',kind:'vercel',name:'Vercel Edge Function (this site)',down:n=>`/api/down?bytes=${n}&r=${rid()}`,up:()=>'/api/up',ping:()=>`/api/down?bytes=0&r=${rid()}`});
-const lsServer=s=>({id:'ls:'+s.id,kind:'librespeed',name:s.name,city:s.city,sponsor:s.sponsor,country:s.country,cc:s.cc,down:n=>withQ(s.dl,`ckSize=${Math.max(1,Math.ceil(n/1e6))}&r=${rid()}`),up:()=>s.ul,ping:()=>withQ(s.ping,'r='+rid())});
+const lsServer=s=>({id:'ls:'+s.id,kind:'librespeed',name:s.name,city:s.city,sponsor:s.sponsor,country:s.country,cc:s.cc,down:n=>withQ(s.dl,`cors=true&ckSize=${Math.max(1,Math.ceil(n/1e6))}&r=${rid()}`),up:()=>withQ(s.ul,'cors=true'),ping:()=>withQ(s.ping,'cors=true&r='+rid())});
 const SV={cands:[],sel:'auto',cur:null,run:0,ready:Promise.resolve(),again:false,busy:false,dir:null,stats:{found:0,probed:0,reachable:0,verified:0}};
 let srv=cfServer();
 function initCands(){SV.cands=[{sv:cfServer(),tier:'provisioned',state:'new'}];if(WEB)SV.cands.push({sv:vcServer(),tier:'provisioned',state:'new'})}
@@ -260,13 +270,13 @@ const TIER={city:'same city',country:'same country',nearby:'nearby country',prov
 
 /* one timed request: milliseconds, or null on failure/timeout */
 async function probe(sv,sig,ms=2500){const c=new AbortController(),t=setTimeout(()=>c.abort(),ms),on=()=>c.abort();if(sig)sig.addEventListener('abort',on,{once:true});const t0=performance.now();
- try{const r=await fetch(sv.ping(),{cache:'no-store',signal:c.signal});if(!r.ok)throw 0;await r.arrayBuffer();return performance.now()-t0}catch{return null}finally{clearTimeout(t);if(sig)sig.removeEventListener('abort',on)}}
+ try{const r=await fetch(sv.ping(),fopt(sv,c.signal));if(!r.ok)throw 0;await r.arrayBuffer();return performance.now()-t0}catch{return null}finally{clearTimeout(t);if(sig)sig.removeEventListener('abort',on)}}
 /* latency and reliability: a warm-up request (so connection setup is not counted), then 4 timed requests: median round trip and how many answered */
 async function rtt(sv){if(await probe(sv,null,3000)==null)return{rtt:null,ok:0,n:4};const a=[];for(let i=0;i<4;i++){const d=await probe(sv,null,2500);if(d!=null)a.push(d)}return{rtt:stats.median(a),ok:a.length,n:4}}
 /* a server must prove BOTH directions work before it can be chosen: a 1 MB download (returns its Mbps) and a 300 KB upload */
-async function verify(sv){const c=new AbortController(),t=setTimeout(()=>c.abort(),8000),t0=performance.now();try{const r=await fetch(sv.down(1e6),{cache:'no-store',signal:c.signal});if(!r.ok)return 0;const n=(await r.arrayBuffer()).byteLength;return n>=9e5?n*8/1e6/Math.max(.001,(performance.now()-t0)/1000):0}catch{return 0}finally{clearTimeout(t)}}
+async function verify(sv){const c=new AbortController(),t=setTimeout(()=>c.abort(),8000),t0=performance.now();try{const r=await fetch(sv.down(1e6),fopt(sv,c.signal));if(!r.ok)return 0;const n=(await r.arrayBuffer()).byteLength;return n>=9e5?n*8/1e6/Math.max(.001,(performance.now()-t0)/1000):0}catch{return 0}finally{clearTimeout(t)}}
 const UPBLOB=new Uint8Array(3e5);
-async function verifyUp(sv){const c=new AbortController(),t=setTimeout(()=>c.abort(),8000);try{const r=await fetch(sv.up(),{method:'POST',body:UPBLOB,cache:'no-store',signal:c.signal});await r.arrayBuffer();return r.ok}catch{return false}finally{clearTimeout(t)}}
+async function verifyUp(sv){const c=new AbortController(),t=setTimeout(()=>c.abort(),8000);try{const r=await fetch(sv.up(),{method:'POST',body:UPBLOB,...fopt(sv,c.signal)});await r.arrayBuffer();return r.ok}catch{return false}finally{clearTimeout(t)}}
 async function verifyC(c){const m=await verify(c.sv);c.mbps=m;if(!m){c.verified=false;c.state='down';c.why='download test failed';return false}
  const up=await verifyUp(c.sv);c.upOk=up;if(!up){c.verified=false;c.state='down';c.why='upload test failed';return false}c.verified=true;return true}
 
@@ -328,7 +338,7 @@ function diagServer(){const w=wanted(),p=here();
   selected:w?{server:svLabel(w.sv),where:svWhere(w.sv),rttMs:Math.round(w.rtt),mode:SV.sel==='auto'?'automatic':'manual'}:null};dlog('server')}
 
 async function tryServer(sv,sig){const c=new AbortController(),t=setTimeout(()=>c.abort(),7000),on=()=>c.abort();sig.addEventListener('abort',on,{once:true});
- try{const r=await fetch(sv.ping(),{cache:'no-store',signal:c.signal});if(!r.ok)throw new Error('HTTP '+r.status);await r.arrayBuffer();return true}
+ try{const r=await fetch(sv.ping(),fopt(sv,c.signal));if(!r.ok)throw new Error('HTTP '+r.status);await r.arrayBuffer();return true}
  catch(e){if(sig.aborted)throw e;return false}finally{clearTimeout(t);sig.removeEventListener('abort',on)}}
 async function connect(sig){await Promise.race([SV.ready,sleep(4000)]);
  const pref=wanted(),order=[];const add=c=>{if(c&&!order.includes(c))order.push(c)};
@@ -344,14 +354,18 @@ async function ping(sig){const N=10,a=[];let lost=0;
  if(a.length<3)throw new Error('Latency probes failed: the server stopped responding.');
  let j=0;for(let i=1;i<a.length;i++)j+=Math.abs(a[i]-a[i-1]);return{ping:stats.median(a),jitter:j/(a.length-1),loss:lost/N*100}}
 async function download(sig){let bytes=0;const t0=performance.now(),DUR=8000,pts=[[0,0]],stop=()=>performance.now()-t0>DUR||bytes>2.5e8,lat=[],endS=sampler(sig,lat);
- const worker=async()=>{let size=4e6;while(!stop()){const r=await fetch(srv.down(size),{cache:'no-store',signal:sig});if(!r.ok)throw new Error('Download request failed (HTTP '+r.status+')');
+ const worker=async()=>{let size=4e6;while(!stop()){const r=await fetch(srv.down(size),fopt(srv,sig));if(!r.ok)throw new Error('Download request failed (HTTP '+r.status+')');
   if(r.body){const rd=r.body.getReader();for(;;){const{done,value}=await rd.read();if(done)break;bytes+=value.length;if(stop()){rd.cancel();break}}}else bytes+=(await r.arrayBuffer()).byteLength;size=Math.min(size*2,5e7)}};
  try{return await run(worker,4,()=>bytes,t0,pts)}finally{endS();S.res.dlLat=stats.median(lat)}}
+/* Only bytes the server has fully received are counted. Browsers report "uploaded" progress as data enters the operating system's send
+   buffer, which overstates the speed (worst on phones and slow lines). Chunks start small and grow while they complete quickly. */
 async function upload(sig){let bytes=0;const t0=performance.now(),DUR=7000,pts=[[0,0]],stop=()=>performance.now()-t0>DUR||bytes>1.5e8,lat=[],endS=sampler(sig,lat);
- const buf=new Uint8Array(1.5e6);for(let i=0;i<buf.length;i+=65536)crypto.getRandomValues(buf.subarray(i,Math.min(i+65536,buf.length)));const blob=new Blob([buf]);
- const worker=async()=>{while(!stop())await new Promise((res,rej)=>{const x=new XMLHttpRequest();x.open('POST',srv.up());let prev=0;
-  x.upload.onprogress=e=>{bytes+=e.loaded-prev;prev=e.loaded};x.onload=res;x.onerror=()=>rej(new Error('Upload request failed'));
-  sig.addEventListener('abort',()=>{x.abort();rej(new DOMException('Aborted','AbortError'))},{once:true});x.send(blob)})};
+ const buf=new Uint8Array(2e6);for(let i=0;i<buf.length;i+=65536)crypto.getRandomValues(buf.subarray(i,Math.min(i+65536,buf.length)));
+ const worker=async()=>{let size=131072;while(!stop()){const blob=new Blob([buf.subarray(0,size)]),t1=performance.now();
+  await new Promise((res,rej)=>{const x=new XMLHttpRequest();x.open('POST',srv.up());
+   x.onload=()=>x.status>=200&&x.status<300?res():rej(new Error('Upload request failed (HTTP '+x.status+')'));x.onerror=()=>rej(new Error('Upload request failed'));
+   sig.addEventListener('abort',()=>{x.abort();rej(new DOMException('Aborted','AbortError'))},{once:true});x.send(blob)});
+  bytes+=size;if(performance.now()-t1<1000)size=Math.min(size*2,2e6)}};
  try{return await run(worker,3,()=>bytes,t0,pts)}finally{endS();S.res.ulLat=stats.median(lat)}}
 async function run(worker,n,get,t0,pts){const iv=setInterval(()=>{const t=performance.now()-t0,b=get();pts.push([t,b]);const w=pts.find(p=>t-p[0]<=1000);const m=(b-w[1])*8/Math.max(.001,(t-w[0])/1000)/1e6;live(m);S.samples.push(m)},100);
  try{await Promise.all(Array.from({length:n},worker))}finally{clearInterval(iv)}
@@ -483,7 +497,7 @@ function providerRow(){const A=info.A;
  if(!A)return[null,API.state==='missing'?'Needs the /api routes: run npm start or deploy to Vercel':info.lookupWhy?'Lookup unavailable: '+info.lookupWhy:'',''];
  const op=A.operator&&A.operator.name&&!['vpn','hosting'].includes(A.ispReason)?' Network operator: '+A.operator.name+'.':'';
  return[null,(ISP_WHY[A.ispReason]||A.ispReason||'Not confirmed')+'.'+op,A.ispDetail||''];}
-function serverRow(){const c=S.running||SV.cur&&S.stage==='done'?SV.cur:wanted();
+function serverRow(){const cur=SV.cur&&(SV.cands.find(x=>x.sv.id===SV.cur.sv.id)||SV.cur),c=S.running||SV.cur&&S.stage==='done'?cur:wanted();
  if(!c||c.state==='down'){const d=SV.dir;return[null,SV.busy||SV.cands.some(x=>x.state==='probing'||x.state==='new')?'Measuring candidates…':d&&d.state!=='ok'?(d.state==='api-missing'?'Server directory needs the /api routes':'Server directory unavailable: '+(d.error||d.state)):'']}
  const k=c.sv.kind,parts=[k==='cloudflare'?'Edge location: '+(info.cfEdge||'unknown'):k==='vercel'?'Serving region: '+(vercelWhere()||'unknown'):c.sv.sponsor?'Operator: '+c.sv.sponsor:'Volunteer-run server',
   c.rtt!=null?Math.round(c.rtt)+' ms':null,TIER[c.tier]||null,SV.sel==='auto'?'auto-selected':'manual',k==='cloudflare'?'anycast, your network picks the edge':null,c.verified?'download and upload verified':null].filter(Boolean).join(' · ');
@@ -494,16 +508,16 @@ function renderInfo(){const d=device(),[pv,pt,pw]=providerRow(),[lv,lt]=location
  const asnTag=A?.asnConflict?'Sources disagree on the ASN owner':info.asnOrg?(A?.isp&&A.asnSameAsIsp?'Network operator (ASN owner), same organization as the provider':'Network operator (ASN owner)'):'';
  const ipRows=info.v4&&info.v6?[['IPv4',info.v4,'',info.ip===info.v4?'Used by the speed test':''],['IPv6',info.v6,'',info.ip===info.v6?'Used by the speed test':'']]:[['Public IP',info.ip,'Not detectable','']];
  const rows=[['Internet provider',pv,'Not confirmed',pt,pw],['Network identifier',asnTxt,'Not detectable',asnTag],'--',
-  ['Location',lv,'Not detectable',lt],...ipRows,['Test server',sv,'Not selected yet',st],['Device',d.type],['Operating system',d.os],['Browser',d.br],['Connection',[d.conn,A?.connectionType?A.connectionType+' (per IP database)':A?.mobile?'Mobile network (per IP database)':null].filter(Boolean).join(' · ')||null],
+  ['Location',lv,'Not detectable',lt],...ipRows,['Test server',sv,'Not selected yet',st],['Device',d.type],['Operating system',d.os],['Browser',d.br],['Connection',[d.conn,A?.connectionType?A.connectionType+' (per IP database)':A?.mobile?'Mobile network (per IP database)':null].filter(Boolean).join(' · ')||null,'Not reported by this browser'],
   ['Local time',new Date().toLocaleString([], {dateStyle:'medium',timeStyle:'medium'})+' ('+Intl.DateTimeFormat().resolvedOptions().timeZone+')']];
  const row=([k,v,na,tag,tip])=>`<div class="row"><dt>${k}</dt><dd class="${v?'':'na'}"${tip?` title="${esc(tip)}"`:''}>${v?esc(v):na||'Not detectable'}${tag?`<small>${esc(tag)}</small>`:''}</dd></div>`;
  $('#info').innerHTML='<div class="grp" role="presentation">NETWORK INFORMATION</div>'+rows.map(r=>r==='--'?'':row(r)).join('')}
 setInterval(()=>{const e=$('#info .row:last-child dd');if(e)e.textContent=new Date().toLocaleString([], {dateStyle:'medium',timeStyle:'medium'})+' ('+Intl.DateTimeFormat().resolvedOptions().timeZone+')'},1000);
 
-/* browser location: only ever requested by an explicit click (or silently when the browser already granted it).
+/* browser location: asked once when the page opens (the visitor can refuse; the IP estimate is used instead), and again by the button.
    Coordinates are rounded to ~1 km before leaving the page, used for the place name, and never stored. */
 const ACC_MAX=10000;
-const GEO_MSG={unknown:'Enable location access for more accurate location detection and smarter test server selection.',asking:'Waiting for your browser’s permission prompt…',
+const GEO_MSG={unknown:'Allow location access for a more accurate location and a nearer test server.',asking:'Waiting for your browser’s permission prompt…',
  denied:'Location access is off, so your location is estimated from your IP address and may be inaccurate. If the browser doesn’t ask again, allow location for this site in its settings.',
  lowacc:'Your device reported a position that is too imprecise to use, so the IP-based estimate is shown.',failed:'Your device could not determine its position, so the IP-based estimate is shown.',
  nogeo:'Device location was found, but the place name could not be looked up. The IP-based estimate is shown.',unsupported:'Browser location needs a secure (https) page and a supporting browser. The IP-based estimate is shown.',
@@ -524,11 +538,16 @@ function locate(){if(locating)return;
   done()},
   e=>{geo=null;geoPos=null;geoState=e.code===1?'denied':'failed';DIAG.location.browser={state:e.code===1?'permission-denied':e.code===3?'timeout':'position-unavailable',code:e.code,message:e.message||null};done()},
   {enableHighAccuracy:false,timeout:15000,maximumAge:600000})}
+let autoAsked=false;
 async function initGeo(){renderGeoUi();
  if(!('geolocation' in navigator)||!isSecureContext){geoState='unsupported';DIAG.location.browser={state:'unsupported',secureContext:isSecureContext};return renderGeoUi()}
+ const ask=()=>{if(autoAsked||locating||geoState==='ok')return;autoAsked=true;locate()};
  try{const st=await navigator.permissions.query({name:'geolocation'});DIAG.location.browser={...DIAG.location.browser,permission:st.state};
-  const sync=()=>{DIAG.location.browser={...DIAG.location.browser,permission:st.state};if(st.state==='granted'){if(geoState!=='ok'&&!locating)locate()}else if(st.state==='denied'){geo=null;geoPos=null;geoState='denied';renderGeoUi();renderInfo()}else if(geoState==='denied'){geoState='unknown';renderGeoUi()}};
-  st.onchange=sync;sync()}catch{}}
+  const sync=()=>{DIAG.location.browser={...DIAG.location.browser,permission:st.state};
+   if(st.state==='granted'){if(geoState!=='ok'&&!locating)locate()}
+   else if(st.state==='denied'){geo=null;geoPos=null;geoState='denied';renderGeoUi();renderInfo()}
+   else{if(geoState==='denied'){geoState='unknown';renderGeoUi()}ask()}};
+  st.onchange=sync;sync()}catch{ask()}}   /* browsers without the Permissions API for geolocation: ask directly */
 $('#geoBtn').onclick=locate;
 
 /* follow the connection: re-identify when the network changes, the device comes back online, or the tab returns after a while */
